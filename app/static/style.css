@@ -118,3 +118,24 @@ tr.row-proposed td { }
   padding: 10px 16px; border-radius: 8px; z-index: 50;
 }
 .toast.err { border-color: var(--bad); }
+
+/* 镜头留白审阅 */
+.gap-review { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+.gap-review h3 { font-size: 14px; margin: 0 0 6px; }
+.shot-gaps {
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel-2); margin-bottom: 10px;
+}
+.shot-head {
+  padding: 8px 12px; border-bottom: 1px solid var(--line);
+  font-weight: 600; font-size: 13px;
+}
+.gap-item {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 8px 12px; border-bottom: 1px solid var(--line);
+}
+.gap-item:last-child { border-bottom: none; }
+.gap-time { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.gap-time .muted { color: var(--muted); margin-left: 8px; }
+.pill.intentional { background: rgba(62,207,142,.15); color: var(--good); }
+.pill.needs-sub { background: rgba(242,180,65,.14); color: var(--warn); }

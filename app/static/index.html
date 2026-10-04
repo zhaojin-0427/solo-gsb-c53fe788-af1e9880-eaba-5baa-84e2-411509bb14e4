@@ -90,6 +90,15 @@
         <tbody></tbody>
       </table>
     </div>
+
+    <!-- 镜头留白审阅 -->
+    <section id="gapReviewPanel" class="gap-review hidden">
+      <h3>镜头留白审阅</h3>
+      <p class="hint">按生效时间轴（已采纳 → 提案 → 原值）逐镜头计算未被字幕覆盖的半开区间；
+        相接/重叠的镜头分别审阅。采纳、撤销或重算参数后：边界未变的结论保留，变化的区间回到待审。</p>
+      <div id="gapStats" class="stats"></div>
+      <div id="gapList"></div>
+    </section>
   </section>
 </main>
 

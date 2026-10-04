@@ -64,6 +64,59 @@ async function loadProjects(selectId) {
 }
 
 // ---------- 渲染 ----------
+const DECISION_LABEL = { intentional: "有意留白", needs_subtitle: "待补字幕" };
+
+function renderGapReview(p) {
+  const panel = $("#gapReviewPanel");
+  const gr = p.gap_review;
+  if (!gr || !gr.shot_count) {           // 无镜头：不生成审阅项
+    panel.classList.add("hidden");
+    return;
+  }
+  panel.classList.remove("hidden");
+  $("#gapStats").innerHTML = [
+    ["留白区间", gr.total, ""],
+    ["待审", gr.pending_count, gr.pending_count ? "warn" : "good"],
+    ["已审", gr.total - gr.pending_count, "good"],
+  ].map(([k, v, cls]) => `<span class="stat ${cls}">${k} <b>${v}</b></span>`).join("");
+
+  const list = $("#gapList");
+  list.innerHTML = "";
+  const byShot = new Map();              // 相接/重叠镜头分别列出
+  for (const it of gr.items) {
+    const arr = byShot.get(it.shot_ord) || [];
+    arr.push(it);
+    byShot.set(it.shot_ord, arr);
+  }
+  for (const [ord, items] of byShot) {
+    const box = document.createElement("div");
+    box.className = "shot-gaps";
+    const head = document.createElement("div");
+    head.className = "shot-head";
+    head.textContent = `镜头 #${ord}　${fmtMs(items[0].shot_start_ms)} → ` +
+      `${fmtMs(items[0].shot_end_ms)}（${items[0].shot_start_ms} → ${items[0].shot_end_ms} ms）`;
+    box.appendChild(head);
+    for (const it of items) {
+      const row = document.createElement("div");
+      row.className = "gap-item";
+      const pill = it.decision
+        ? `<span class="pill ${it.decision === "intentional" ? "intentional" : "needs-sub"}">${DECISION_LABEL[it.decision]}</span>`
+        : `<span class="pill proposed">待审</span>`;
+      const attrs = `data-shot="${it.shot_ord}" data-start="${it.gap_start_ms}" data-end="${it.gap_end_ms}"`;
+      row.innerHTML = `
+        <span class="gap-time">${fmtMs(it.gap_start_ms)} → ${fmtMs(it.gap_end_ms)}<span class="muted">${it.gap_start_ms} → ${it.gap_end_ms} ms · 时长 ${it.duration_ms} ms</span></span>
+        ${pill}
+        <span class="row-actions">
+          <button class="mini" data-gap-act="intentional" ${attrs}>有意留白</button>
+          <button class="mini" data-gap-act="needs_subtitle" ${attrs}>待补字幕</button>
+          ${it.decision ? `<button class="mini" data-gap-act="clear" ${attrs}>清除</button>` : ""}
+        </span>`;
+      box.appendChild(row);
+    }
+    list.appendChild(box);
+  }
+}
+
 function render() {
   const p = state.project;
   if (!p) {
@@ -161,6 +214,7 @@ function render() {
   $("#exportZip").href = base + "?fmt=zip";
   $("#exportSrt").href = base + "?fmt=srt";
   $("#projectSelect").value = String(p.id);
+  renderGapReview(p);
 }
 
 // 采纳可能因另一标签页并发改参数而被拒（旧提案失效）：重新拉取详情，
@@ -268,8 +322,40 @@ $("#adoptAllBtn").addEventListener("click", async () => {
   }
 });
 
-$("#deleteProjectBtn").addEventListener("click", async () => {
-  if (!state.project) return;
+// 镜头留白审阅：标记 / 清除。过期页面（参数或采纳已在别处变化）提交的
+// 结论会被服务端 400 拒绝，此时刷新到最新状态，避免误标新留白。
+$("#gapList").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("button[data-gap-act]");
+  if (!btn || !state.project) return;
+  const pid = state.project.id;
+  const shotOrd = parseInt(btn.dataset.shot, 10);
+  const gapStart = parseInt(btn.dataset.start, 10);
+  const gapEnd = parseInt(btn.dataset.end, 10);
+  const act = btn.dataset.gapAct;
+  try {
+    if (act === "clear") {
+      const q = `shot_ord=${shotOrd}&gap_start_ms=${gapStart}&gap_end_ms=${gapEnd}`;
+      state.project = await api(`/api/projects/${pid}/gaps/review?${q}`,
+                                { method: "DELETE" });
+      toast("已清除审阅标记，回到待审");
+    } else {
+      state.project = await api(`/api/projects/${pid}/gaps/review`, {
+        method: "POST",
+        body: JSON.stringify({
+          shot_ord: shotOrd, gap_start_ms: gapStart,
+          gap_end_ms: gapEnd, decision: act,
+        }),
+      });
+      toast(`已标记为「${DECISION_LABEL[act]}」`);
+    }
+    render();
+  } catch (e) {
+    toast(e.message + "（留白已随参数/采纳变化，已刷新）", true);
+    refreshAfterConflict(pid);
+  }
+});
+
+$("#deleteProjectBtn").addEventListener("click", async () => {  if (!state.project) return;
   if (!confirm(`确定删除项目「${state.project.name}」？该操作不可恢复。`)) return;
   try {
     await api(`/api/projects/${state.project.id}`, { method: "DELETE" });
