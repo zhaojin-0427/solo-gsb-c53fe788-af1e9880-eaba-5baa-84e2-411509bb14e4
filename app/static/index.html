@@ -91,6 +91,28 @@
       </table>
     </div>
   </section>
+
+  <!-- 镜头留白审阅 -->
+  <section id="gapPanel" class="panel hidden">
+    <h2>镜头留白审阅</h2>
+    <div id="gapStats" class="stats"></div>
+    <p id="gapEmpty" class="hint hidden"></p>
+    <div class="table-wrap" id="gapTableWrap">
+      <table id="gapTable">
+        <thead>
+          <tr>
+            <th>镜头</th><th>镜头区间 (ms)</th><th>留白 起→止</th>
+            <th>时长</th><th>审阅状态</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <p class="hint">留白按导出 SRT 的生效时间轴（已采纳 → 提案 → 原值）逐镜头
+      计算，区间为半开毫秒 [起, 止)；相接/重叠的镜头分别审阅，完全没有字幕的
+      镜头以整段为一项。采纳、撤销或重算参数使边界变化时，未变的结论保留，
+      变化的区间回到「待审」。</p>
+  </section>
 </main>
 
 <div id="toast" class="toast hidden"></div>

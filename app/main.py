@@ -1,4 +1,4 @@
-"""FastAPI 入口：项目导入、分析、采纳、导出。"""
+"""FastAPI 入口：项目导入、分析、采纳、镜头留白审阅、导出。"""
 from __future__ import annotations
 
 import hashlib
@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from . import database as db
 from .analysis import build_analysis, revalidate_adoptions
+from .gaps import compute_shot_gaps
 from .shots import Shot, parse_shots
 from .subtitles import ParsedCue, parse_subtitle, visible_text
 
@@ -37,6 +38,17 @@ class AdoptIn(BaseModel):
     cue_uid: int
     new_start_ms: int
     new_end_ms: int
+
+
+# 留白审阅结论：有意留白 / 待补字幕
+GAP_DECISIONS = ("intentional", "needs_subtitle")
+
+
+class GapReviewIn(BaseModel):
+    shot_ord: int
+    start_ms: int
+    end_ms: int
+    decision: str
 
 
 # ---------- 序列化 ----------
@@ -77,6 +89,46 @@ def _load_inputs(conn, pid: int) -> tuple:
     return prow, cue_db_rows, shots, parsed
 
 
+def _effective_of(rep) -> tuple[int, int]:
+    """一条 cue 在导出时间轴上的生效位置：已采纳取采纳值；未采纳先取
+    提案，无提案取原值。与导出共用的 _effective_times 同一规则。"""
+    s, e = rep.adopted_start_ms, rep.adopted_end_ms
+    if s is None:
+        s, e = rep.proposal_start_ms, rep.proposal_end_ms
+    if s is None:
+        s, e = rep.start_ms, rep.end_ms
+    return s, e
+
+
+def _gap_section(conn, pid: int, shots: list[Shot], analysis) -> dict:
+    """按 SRT 导出的有效时间轴计算每个镜头的留白区间，并按
+    (shot_ord, start_ms, end_ms) 精确匹配附上库中已保存的审阅结论；
+    无镜头时 items 为空（不生成审阅项）。"""
+    coverage = [_effective_of(rep) for rep in analysis.cues]
+    items = compute_shot_gaps(
+        [(s.ord, s.start_ms, s.end_ms) for s in shots], coverage)
+    reviews = {
+        (r["shot_ord"], r["start_ms"], r["end_ms"]): r["decision"]
+        for r in db.get_gap_reviews(conn, pid)
+    }
+    out = []
+    for it in items:
+        key = (it["shot_ord"], it["start_ms"], it["end_ms"])
+        out.append({
+            **it,
+            "duration_ms": it["end_ms"] - it["start_ms"],
+            "decision": reviews.get(key),
+        })
+    stats = {
+        "total": len(out),
+        "pending": sum(1 for i in out if i["decision"] is None),
+        "intentional": sum(1 for i in out if i["decision"] == "intentional"),
+        "needs_subtitle": sum(
+            1 for i in out if i["decision"] == "needs_subtitle"),
+    }
+    return {"items": out, "stats": stats}
+
+
 def _recompute_from(conn, pid: int, prow, cue_db_rows, shots, parsed) -> dict:
     analysis = build_analysis(
         parsed, shots, prow["cps_limit"],
@@ -105,12 +157,23 @@ def _recompute_from(conn, pid: int, prow, cue_db_rows, shots, parsed) -> dict:
             "intrinsic": analysis.intrinsic,
             "stats": analysis.stats,
         },
+        "gaps": _gap_section(conn, pid, shots, analysis),
     }
 
 
 def _recompute(conn, pid: int) -> dict:
     prow, cue_db_rows, shots, parsed = _load_inputs(conn, pid)
     return _recompute_from(conn, pid, prow, cue_db_rows, shots, parsed)
+
+
+def _recompute_and_prune(conn, pid: int) -> dict:
+    """重算项目状态并在同一写事务内迁移留白审阅结论：边界未变的留白
+    保留原结论；边界已变化的旧结论被剪除，对应新区间回到「待审」。"""
+    payload = _recompute(conn, pid)
+    valid = {(i["shot_ord"], i["start_ms"], i["end_ms"])
+             for i in payload["gaps"]["items"]}
+    db.prune_gap_reviews(conn, pid, valid)
+    return payload
 
 
 # ---------- 路由 ----------
@@ -232,7 +295,7 @@ def update_settings(pid: int, body: SettingsIn):
             proposals,
         ):
             db.delete_adoption(conn, pid, uid)
-        return _recompute(conn, pid)
+        return _recompute_and_prune(conn, pid)
 
 
 @app.post("/api/projects/{pid}/adopt")
@@ -262,14 +325,14 @@ def adopt(pid: int, body: AdoptIn):
             raise HTTPException(400, "采纳值必须等于系统给出的提案时间")
         db.upsert_adoption(conn, pid, body.cue_uid,
                            body.new_start_ms, body.new_end_ms)
-        return _recompute(conn, pid)
+        return _recompute_and_prune(conn, pid)
 
 
 @app.delete("/api/projects/{pid}/adopt/{cue_uid}")
 def revert_adoption(pid: int, cue_uid: int):
     with db.get_conn(write=True) as conn:
         db.delete_adoption(conn, pid, cue_uid)
-        return _recompute(conn, pid)
+        return _recompute_and_prune(conn, pid)
 
 
 @app.delete("/api/projects/{pid}")
@@ -277,6 +340,44 @@ def remove_project(pid: int):
     with db.get_conn(write=True) as conn:
         db.delete_project(conn, pid)
     return {"ok": True}
+
+
+# ---------- 镜头留白审阅 ----------
+
+@app.post("/api/projects/{pid}/gap-reviews")
+def mark_gap(pid: int, body: GapReviewIn):
+    """把某个留白区间标记为「有意留白」或「待补字幕」。
+
+    与采纳同一把写锁：BEGIN IMMEDIATE 后在锁内按最新状态重算留白，
+    提交的三元组 (shot_ord, start_ms, end_ms) 必须仍是当前留白——
+    过期页面（采纳/撤销/参数重算已改变边界）提交的旧区间被 409 拒绝，
+    不会把结论误标到边界不同的新留白上。
+    """
+    if body.decision not in GAP_DECISIONS:
+        raise HTTPException(
+            400, f"decision 仅支持 {' / '.join(GAP_DECISIONS)}")
+    with db.get_conn(write=True) as conn:
+        if db.get_project(conn, pid) is None:
+            raise HTTPException(404, "项目不存在")
+        payload = _recompute(conn, pid)
+        keys = {(i["shot_ord"], i["start_ms"], i["end_ms"])
+                for i in payload["gaps"]["items"]}
+        key = (body.shot_ord, body.start_ms, body.end_ms)
+        if key not in keys:
+            raise HTTPException(
+                409, "该留白区间已因最新采纳/参数变化而改变，请刷新后重试")
+        db.upsert_gap_review(conn, pid, *key, body.decision)
+        return _recompute(conn, pid)
+
+
+@app.delete("/api/projects/{pid}/gap-reviews/{shot_ord}/{start_ms}/{end_ms}")
+def unmark_gap(pid: int, shot_ord: int, start_ms: int, end_ms: int):
+    """撤销某留白区间的审阅结论，回到「待审」（幂等：不存在视为已撤销）。"""
+    with db.get_conn(write=True) as conn:
+        if db.get_project(conn, pid) is None:
+            raise HTTPException(404, "项目不存在")
+        db.delete_gap_review(conn, pid, shot_ord, start_ms, end_ms)
+        return _recompute(conn, pid)
 
 
 # ---------- 导出 ----------

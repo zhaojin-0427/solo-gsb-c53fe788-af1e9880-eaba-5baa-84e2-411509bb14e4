@@ -110,6 +110,9 @@ tr.row-proposed td { }
 .pill.adopted { background: rgba(62,207,142,.15); color: var(--good); }
 .pill.proposed { background: rgba(242,180,65,.14); color: var(--warn); }
 .pill.conflict { background: rgba(240,98,107,.14); color: var(--bad); }
+.pill.pending { background: rgba(138,152,168,.16); color: var(--muted); }
+.pill.intentional { background: rgba(62,207,142,.15); color: var(--good); }
+.pill.needs_subtitle { background: rgba(240,98,107,.14); color: var(--bad); }
 .row-actions { display: flex; gap: 6px; }
 .mini { padding: 3px 9px; font-size: 12px; }
 .toast {

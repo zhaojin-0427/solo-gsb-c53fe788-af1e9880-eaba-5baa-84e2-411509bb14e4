@@ -63,11 +63,67 @@ async function loadProjects(selectId) {
   }
 }
 
+// ---------- 镜头留白审阅 ----------
+const DECISION_LABEL = { intentional: "有意留白", needs_subtitle: "待补字幕" };
+
+function renderGaps() {
+  const p = state.project;
+  const panel = $("#gapPanel");
+  // 无镜头时不生成审阅项：隐藏整个面板
+  if (!p || !p.shots || !p.shots.length) {
+    panel.classList.add("hidden");
+    return;
+  }
+  panel.classList.remove("hidden");
+  const g = p.gaps || { items: [], stats: {} };
+  const gs = g.stats;
+  $("#gapStats").innerHTML = [
+    ["留白区间", gs.total ?? 0, ""],
+    ["待审", gs.pending ?? 0, gs.pending ? "warn" : "good"],
+    ["有意留白", gs.intentional ?? 0, "good"],
+    ["待补字幕", gs.needs_subtitle ?? 0, gs.needs_subtitle ? "bad" : "good"],
+  ].map(([k, v, cls]) => `<span class="stat ${cls}">${k} <b>${v}</b></span>`).join("");
+
+  const empty = $("#gapEmpty");
+  const wrap = $("#gapTableWrap");
+  const tb = $("#gapTable tbody");
+  tb.innerHTML = "";
+  if (!g.items.length) {
+    empty.textContent = "所有镜头区间均被字幕覆盖，无留白。";
+    empty.classList.remove("hidden");
+    wrap.classList.add("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  wrap.classList.remove("hidden");
+  for (const it of g.items) {
+    const tr = document.createElement("tr");
+    const pill = it.decision == null
+      ? `<span class="pill pending">待审</span>`
+      : `<span class="pill ${it.decision}">${DECISION_LABEL[it.decision]}</span>`;
+    const key = `data-shot-ord="${it.shot_ord}" data-start="${it.start_ms}" data-end="${it.end_ms}"`;
+    tr.innerHTML = `
+      <td>镜头 ${it.shot_ord}</td>
+      <td>${it.shot_start_ms} → ${it.shot_end_ms}</td>
+      <td>${fmtMs(it.start_ms)} → ${fmtMs(it.end_ms)}
+          <div class="hash">${it.start_ms} → ${it.end_ms} ms</div></td>
+      <td>${it.duration_ms} ms</td>
+      <td>${pill}</td>
+      <td><div class="row-actions">
+        <button class="mini" data-gact="intentional" ${key}>有意留白</button>
+        <button class="mini" data-gact="needs_subtitle" ${key}>待补字幕</button>
+        ${it.decision != null ? `<button class="mini" data-gact="clear" ${key}>撤销</button>` : ""}
+      </div></td>`;
+    tb.appendChild(tr);
+  }
+}
+
 // ---------- 渲染 ----------
 function render() {
   const p = state.project;
   if (!p) {
     $("#workspace").classList.add("hidden");
+    $("#gapPanel").classList.add("hidden");
     $("#importPanel").classList.remove("hidden");
     return;
   }
@@ -161,6 +217,7 @@ function render() {
   $("#exportZip").href = base + "?fmt=zip";
   $("#exportSrt").href = base + "?fmt=srt";
   $("#projectSelect").value = String(p.id);
+  renderGaps();
 }
 
 // 采纳可能因另一标签页并发改参数而被拒（旧提案失效）：重新拉取详情，
@@ -237,6 +294,39 @@ $("#cueTable").addEventListener("click", async (ev) => {
     loadProjects();
   } catch (e) {
     toast(e.message + "（参数可能已在别处更新，已刷新）", true);
+    refreshAfterConflict(pid);
+  }
+});
+
+// 留白审阅：标记「有意留白 / 待补字幕」或撤销结论。若提交时留白边界已因
+// 另一标签页的采纳/参数重算而改变，服务端返回 409 —— 刷新到最新状态，
+// 避免把结论误标到新区间上。
+$("#gapTable").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("button[data-gact]");
+  if (!btn || !state.project) return;
+  const pid = state.project.id;
+  const shotOrd = parseInt(btn.dataset.shotOrd, 10);
+  const start = parseInt(btn.dataset.start, 10);
+  const end = parseInt(btn.dataset.end, 10);
+  try {
+    if (btn.dataset.gact === "clear") {
+      state.project = await api(
+        `/api/projects/${pid}/gap-reviews/${shotOrd}/${start}/${end}`,
+        { method: "DELETE" });
+      toast("已撤销审阅结论，回到待审");
+    } else {
+      state.project = await api(`/api/projects/${pid}/gap-reviews`, {
+        method: "POST",
+        body: JSON.stringify({
+          shot_ord: shotOrd, start_ms: start, end_ms: end,
+          decision: btn.dataset.gact,
+        }),
+      });
+      toast(`已标记为「${DECISION_LABEL[btn.dataset.gact]}」`);
+    }
+    render();
+  } catch (e) {
+    toast(e.message + "（留白可能已在别处变化，已刷新）", true);
     refreshAfterConflict(pid);
   }
 });

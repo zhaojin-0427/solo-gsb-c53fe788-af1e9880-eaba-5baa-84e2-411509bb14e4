@@ -1,4 +1,4 @@
-"""SQLite 持久化层：项目、字幕条目、镜头、采纳状态。"""
+"""SQLite 持久化层：项目、字幕条目、镜头、采纳状态、镜头留白审阅结论。"""
 from __future__ import annotations
 
 import os
@@ -46,6 +46,15 @@ CREATE TABLE IF NOT EXISTS adoptions (
     new_end_ms   INTEGER NOT NULL,
     adopted_at   TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (project_id, cue_uid)
+);
+CREATE TABLE IF NOT EXISTS gap_reviews (
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    shot_ord   INTEGER NOT NULL,
+    start_ms   INTEGER NOT NULL,
+    end_ms     INTEGER NOT NULL,
+    decision   TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, shot_ord, start_ms, end_ms)
 );
 """
 
@@ -181,6 +190,63 @@ def delete_adoption(conn: sqlite3.Connection, pid: int, cue_uid: int) -> None:
     conn.execute(
         "DELETE FROM adoptions WHERE project_id=? AND cue_uid=?", (pid, cue_uid)
     )
+
+
+# ---------- 镜头留白审阅 ----------
+
+def get_gap_reviews(conn: sqlite3.Connection, pid: int) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        "SELECT * FROM gap_reviews WHERE project_id=? ORDER BY shot_ord, start_ms",
+        (pid,),
+    ))
+
+
+def upsert_gap_review(
+    conn: sqlite3.Connection, pid: int,
+    shot_ord: int, start_ms: int, end_ms: int, decision: str,
+) -> None:
+    conn.execute(
+        "INSERT INTO gap_reviews (project_id, shot_ord, start_ms, end_ms, decision)"
+        " VALUES (?,?,?,?,?)"
+        " ON CONFLICT(project_id, shot_ord, start_ms, end_ms) DO UPDATE SET"
+        " decision=excluded.decision, updated_at=datetime('now')",
+        (pid, shot_ord, start_ms, end_ms, decision),
+    )
+
+
+def delete_gap_review(
+    conn: sqlite3.Connection, pid: int,
+    shot_ord: int, start_ms: int, end_ms: int,
+) -> None:
+    conn.execute(
+        "DELETE FROM gap_reviews WHERE project_id=? AND shot_ord=?"
+        " AND start_ms=? AND end_ms=?",
+        (pid, shot_ord, start_ms, end_ms),
+    )
+
+
+def prune_gap_reviews(
+    conn: sqlite3.Connection, pid: int,
+    valid_keys: set[tuple[int, int, int]],
+) -> int:
+    """状态迁移：删除已不在当前留白集合中的审阅结论。
+
+    有效时间轴因采纳/撤销/参数重算改变后，调用方在同一写事务内以当前
+    留白键集合 (shot_ord, start_ms, end_ms) 调用本函数：边界未变的结论
+    保留，边界已变化的旧结论被剪除（对应新区间回到「待审」），不会把
+    旧结论误挂到边界不同的新留白上。返回剪除条数。
+    """
+    stale = [
+        (r["shot_ord"], r["start_ms"], r["end_ms"])
+        for r in get_gap_reviews(conn, pid)
+        if (r["shot_ord"], r["start_ms"], r["end_ms"]) not in valid_keys
+    ]
+    conn.executemany(
+        "DELETE FROM gap_reviews WHERE project_id=? AND shot_ord=?"
+        " AND start_ms=? AND end_ms=?",
+        [(pid, *k) for k in stale],
+    )
+    return len(stale)
 
 
 def delete_project(conn: sqlite3.Connection, pid: int) -> None:
